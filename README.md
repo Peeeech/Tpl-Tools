@@ -2,6 +2,12 @@
 CLI tool for decompiling and compiling TPL files.
 - Does not currently support editing image attributes (e.g. lod_bias, min/mag_filter)
 
+# PIP REQUIREMENTS:
+
+pillow
+
+numpy
+
 Usage:
   pytpl.py [-h] (-d | -c) [--compress | --no-compress] [--compression-threshold INT] input (file or folder)
 
