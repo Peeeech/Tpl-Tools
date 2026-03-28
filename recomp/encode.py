@@ -363,8 +363,6 @@ def encode_pil_image(img_obj, fmt, palette=None, quality=False):
         for color in global_palette:
             palette_data += struct.pack(">H", color)
 
-        print(len(global_palette))
-
         palette_header = struct.pack(
             ">HBBII",
             len(global_palette),  # number of entries
