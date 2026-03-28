@@ -1,9 +1,3 @@
-import os
-import sys
-import numpy as np
-from PIL import Image
-import argparse
-
 # Global list to store image data as dictionaries
 image_data_list = []
 filesToDelete = []
@@ -51,6 +45,12 @@ FORMAT_MAP = {
     IMG_FMT_CMPR: "CMPR"
 }
 
+PAL_FORMAT_MAP = {
+    0x00: "I8",
+    0x01: "RGB565",
+    0x02: "RGB5A3",
+}
+
 # -----------------------------------------------------------------------------
 #                           HELPER FUNCTIONS
 # -----------------------------------------------------------------------------
@@ -67,6 +67,41 @@ def rgb565_to_rgba(value: int) -> tuple[int, int, int, int]:
     B = (b * 255) // 31
 
     return (R, G, B, 255)
+
+# ================================ PAL DECOMPRESSION ===========================
+def decode_palette(raw_data, palette_format, entry_count):
+    entries = []
+
+    for i in range(entry_count):
+        hi = raw_data[i*2]
+        lo = raw_data[i*2 + 1]
+        val = (hi << 8) | lo
+
+        if palette_format == "IA8":
+            A = (val >> 8) & 0xFF
+            I = val & 0xFF
+            entries.append((I, I, I, A))
+
+        elif palette_format == "RGB565":
+            r = ((val >> 11) & 0x1F) * 255 // 31
+            g = ((val >> 5) & 0x3F) * 255 // 63
+            b = (val & 0x1F) * 255 // 31
+            entries.append((r, g, b, 255))
+
+        elif palette_format == "RGB5A3":
+            if val & 0x8000:
+                r = ((val >> 10) & 0x1F) * 255 // 31
+                g = ((val >> 5) & 0x1F) * 255 // 31
+                b = (val & 0x1F) * 255 // 31
+                a = 255
+            else:
+                a = ((val >> 12) & 0x7) * 255 // 7
+                r = ((val >> 8) & 0xF) * 255 // 15
+                g = ((val >> 4) & 0xF) * 255 // 15
+                b = (val & 0xF) * 255 // 15
+            entries.append((r, g, b, a))
+
+    return entries
 
 # ================================ I4 DECOMPRESSION ============================
 def decode_I4(raw_data, height, width):
@@ -165,9 +200,6 @@ def decode_IA4(raw_data, height, width):
     """
 
     # Read all raw tile data
-
-    # We'll store the final image as RGBA
-    image = np.zeros((height, width, 4), dtype=np.uint8)
 
     # Compute how many tiles horizontally and vertically
     tile_w = 8
@@ -349,8 +381,6 @@ def decode_RGB5A3(raw_data, height, width):
     
     rgba = bytearray(width * height * 4)
 
-    image = np.zeros((height, width, 4), dtype=np.uint8)
-
     offset = 0
     for ty in range(tiles_y):
         for tx in range(tiles_x):
@@ -447,22 +477,103 @@ def decode_RGBA32(raw_data, height, width):
     return rgba
 
 # ================================ C4 DECOMPRESSION ============================
-def decode_C4(file):
-    """
-    4-bit color index => requires a separate palette to decode actual colors.
-    Not implemented here because the palette is not given in the file alone.
-    """
-    raise NotImplementedError("C4 decoding requires external palette.")
+def decode_C4(raw_data, height, width, palette):
+    tile_w = 8
+    tile_h = 8
+    tile_size = 32  # 8×8×4bpp = 32 bytes
+
+    tiles_x = (width  + tile_w - 1) // tile_w
+    tiles_y = (height + tile_h - 1) // tile_h
+
+    rgba = bytearray(width * height * 4)
+
+    offset = 0
+
+    for ty in range(tiles_y):
+        for tx in range(tiles_x):
+
+            tile_data = raw_data[offset:offset + tile_size]
+            offset += tile_size
+
+            pixel_i = 0  # index into tile_data
+
+            for row in range(tile_h):
+                iy = ty * tile_h + row
+                if iy >= height:
+                    break
+
+                for col in range(0, tile_w, 2):  # 2 pixels per byte
+                    ix = tx * tile_w + col
+                    if ix >= width:
+                        break
+
+                    byte = tile_data[pixel_i]
+                    pixel_i += 1
+
+                    # extract nibbles
+                    hi = (byte >> 4) & 0xF
+                    lo = byte & 0xF
+
+                    # --- first pixel (high nibble) ---
+                    idx0 = (iy * width + ix) * 4
+                    if ix < width:
+                        r, g, b, a = palette[hi]
+                        rgba[idx0:idx0+4] = (r, g, b, a)
+
+                    # --- second pixel (low nibble) ---
+                    if ix + 1 < width:
+                        idx1 = (iy * width + (ix + 1)) * 4
+                        r, g, b, a = palette[lo]
+                        rgba[idx1:idx1+4] = (r, g, b, a)
+
+    return rgba
 
 # ================================ C8 DECOMPRESSION ============================
-def decode_C8(file):
+def decode_C8(raw_data, height, width, palette):
     """
-    8-bit color index => also requires an external palette.
+    8-bit color index => requires external palette.
     """
-    raise NotImplementedError("C8 decoding requires external palette.")
+    tile_w = 8
+    tile_h = 4
+    tile_size = 32  # 8×4×1 byte = 32 bytes
+
+    tiles_x = (width  + tile_w - 1) // tile_w
+    tiles_y = (height + tile_h - 1) // tile_h
+
+    rgba = bytearray(width * height * 4)
+
+    offset = 0
+
+    for ty in range(tiles_y):
+        for tx in range(tiles_x):
+
+            tile_data = raw_data[offset:offset + tile_size]
+            offset += tile_size
+
+            pixel_i = 0
+
+            for row in range(tile_h):
+                iy = ty * tile_h + row
+                if iy >= height:
+                    break
+
+                for col in range(tile_w):
+                    ix = tx * tile_w + col
+                    if ix >= width:
+                        break
+
+                    index = tile_data[pixel_i]
+                    pixel_i += 1
+
+                    r, g, b, a = palette[index]
+
+                    idx = (iy * width + ix) * 4
+                    rgba[idx:idx+4] = (r, g, b, a)
+
+    return rgba
 
 # ================================ C14X2 DECOMPRESSION ========================
-def decode_C14X2(file):
+def decode_C14X2(raw_data, height, width, palette):
     """
     14-bit color index => also requires an external palette.
     """
@@ -484,6 +595,8 @@ def decompress_cmpr_block(block):
     # Decode the base colors
     rgba0 = rgb565_to_rgba(c0)  # (r,g,b,255)
     rgba1 = rgb565_to_rgba(c1)  # (r,g,b,255)
+    #print(hex(c0), hex(c1), rgba0, rgba1)
+    print(hex(int.from_bytes(color_table, "big")))
 
     # Build the color palette for this block
     colors = [rgba0, rgba1]
@@ -516,14 +629,15 @@ def decompress_cmpr_block(block):
 
     # Now decode 4 rows of 2-bit indices
     # color_table[i] has 4 indices (2 bits each) for row i
+    indices = int.from_bytes(color_table, "big")
+
     texels_4x4 = []
     for i in range(4):
         row = []
-        row_val = color_table[i]
         for j in range(4):
-            # extract 2 bits from row_val
-            idx_shift = 6 - 2*j
-            idx = (row_val >> idx_shift) & 0x03
+            pixel_index = i * 4 + j
+            shift = 30 - (pixel_index * 2)
+            idx = (indices >> shift) & 0x03
             row.append(colors[idx])
         texels_4x4.append(row)
 
