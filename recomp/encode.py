@@ -566,7 +566,7 @@ def prep(imgList, quality, compress=False, threshold=100):
 
             final = encode_pil_image(img_obj, "CMPR", None, quality)
             if final:
-                fmt, image_header, encoded = final
+                fmt, image_header, encoded, _, _ = final
 
         data.append((fmt, image_header, encoded, pal_header, pal_data))
 
