@@ -363,6 +363,8 @@ def encode_pil_image(img_obj, fmt, palette=None, quality=False):
         for color in global_palette:
             palette_data += struct.pack(">H", color)
 
+        #print(len(global_palette))
+
         palette_header = struct.pack(
             ">HBBII",
             len(global_palette),  # number of entries
@@ -551,7 +553,6 @@ def _scan(folder_path):
     return scanned
 
 def prep(imgList, quality, compress=False, threshold=100):
-    
     data = []
     for img_obj, name, format, palette in imgList:
         final = encode_pil_image(img_obj, format, palette, quality)
@@ -574,19 +575,25 @@ def prep(imgList, quality, compress=False, threshold=100):
 
 #cmpr helpers
 def rgb888_to_rgb565(r, g, b):
-    r5 = (r * 31 + 127) // 255
-    g6 = (g * 63 + 127) // 255
-    b5 = (b * 31 + 127) // 255
+    r5 = (int(r) * 31 + 127) // 255
+    g6 = (int(g) * 63 + 127) // 255
+    b5 = (int(b) * 31 + 127) // 255
     return (r5 << 11) | (g6 << 5) | b5
 
 def rgb565_to_rgb888(rgb):
     r5 = (rgb >> 11) & 0x1F
     g6 = (rgb >> 5) & 0x3F
     b5 = rgb & 0x1F
-    r = (r5 * 255 + 15) // 31
-    g = (g6 * 255 + 31) // 63
-    b = (b5 * 255 + 15) // 31
+    r = (int(r5) * 255 + 15) // 31
+    g = (int(g6) * 255 + 31) // 63
+    b = (int(b5) * 255 + 15) // 31
     return (r, g, b)
+
+def color_dist(a, b):
+    dr = a[0] - b[0]
+    dg = a[1] - b[1]
+    db = a[2] - b[2]
+    return 2*dr*dr + 4*dg*dg + 3*db*db
 
 def encode_cmpr_block(block, quality):
     flat = [block[y][x] for y in range(4) for x in range(4)]
@@ -595,7 +602,7 @@ def encode_cmpr_block(block, quality):
     if all(p[3] < 128 for p in flat):
         color0 = rgb888_to_rgb565(0, 0, 0)
         color1 = rgb888_to_rgb565(0, 0, 1)
-        return struct.pack(">HHI", color0, color1, 0xFFFFFFFF)  # all index 3
+        return struct.pack(">HHI", color0, color1, 0xFFFFFFFF)
 
     # Separate opaque & transparent
     opaque_pixels = [p[:3] for p in flat if p[3] >= 128]
@@ -604,57 +611,137 @@ def encode_cmpr_block(block, quality):
     if not opaque_pixels:
         opaque_pixels = [(0, 0, 0)]
 
-    # Pick endpoints
-    if quality:
-        rgb565_colors = [rgb888_to_rgb565(*p) for p in opaque_pixels]
-        rgb888_colors = [rgb565_to_rgb888(c) for c in rgb565_colors]
-        max_dist = -1
-        color0 = color1 = rgb565_colors[0]
-        for i in range(len(rgb888_colors)):
-            for j in range(i + 1, len(rgb888_colors)):
-                dist = np.sum((np.array(rgb888_colors[i]) - np.array(rgb888_colors[j])) ** 2)
-                if dist > max_dist:
-                    max_dist = dist
-                    color0 = rgb565_colors[i]
-                    color1 = rgb565_colors[j]
+    # endpoint selection
+    if quality and len(opaque_pixels) > 1:
+        pts = np.array(opaque_pixels, dtype=np.float32)
+
+        mean = np.mean(pts, axis=0)
+        centered = pts - mean
+
+        cov = np.dot(centered.T, centered)
+        eigvals, eigvecs = np.linalg.eig(cov)
+        axis = eigvecs[:, np.argmax(eigvals)]
+
+        projections = np.dot(centered, axis)
+
+        c0 = pts[np.argmax(projections)]
+        c1 = pts[np.argmin(projections)]
+
+        # snap to nearest real pixel
+        def snap(color):
+            best = opaque_pixels[0]
+            best_d = float("inf")
+            for p in opaque_pixels:
+                d = (color[0]-p[0])**2 + (color[1]-p[1])**2 + (color[2]-p[2])**2
+                if d < best_d:
+                    best_d = d
+                    best = p
+            return best
+
+        c0 = snap(c0)
+        c1 = snap(c1)
+
     else:
         r_vals, g_vals, b_vals = zip(*opaque_pixels)
-        max_rgb = (max(r_vals), max(g_vals), max(b_vals))
-        min_rgb = (min(r_vals), min(g_vals), min(b_vals))
-        color0 = rgb888_to_rgb565(*max_rgb)
-        color1 = rgb888_to_rgb565(*min_rgb)
+        c0 = (max(r_vals), max(g_vals), max(b_vals))
+        c1 = (min(r_vals), min(g_vals), min(b_vals))
 
-    # Force transparent mode if any pixel is transparent
-    force_transparent_mode = transparent_pixels_exist
-    if force_transparent_mode:
+    color0 = rgb888_to_rgb565(*c0)
+    color1 = rgb888_to_rgb565(*c1)
+
+    # ordering (DXT1 rules)
+    if transparent_pixels_exist:
         if color0 >= color1:
             color0, color1 = color1, color0
     else:
         if color0 <= color1:
             color0, color1 = color1, color0
 
-    # Build palette
-    c0 = np.array(rgb565_to_rgb888(color0))
-    c1 = np.array(rgb565_to_rgb888(color1))
-    if color0 > color1:
-        palette = [c0, c1, (2 * c0 + c1) // 3, (c0 + 2 * c1) // 3]
-    else:
-        palette = [c0, c1, (c0 + c1) // 2, np.array([0, 0, 0])]  # index 3 is transparent
+    def build_palette(color0, color1):
+        c0 = np.array(rgb565_to_rgb888(color0))
+        c1 = np.array(rgb565_to_rgb888(color1))
 
-    # Assign indices
-    indices = 0
-    for i, (r, g, b, a) in enumerate(flat):
-        if a < 128:
-            index = 3  # force index 3 if any transparency is in block
+        if color0 > color1:
+            return [
+                c0,
+                c1,
+                (2 * c0 + c1) // 3,
+                (c0 + 2 * c1) // 3
+            ]
         else:
-            color = np.array([r, g, b])
-            dists = [np.sum((color - p) ** 2) for p in palette]
-            index = int(np.argmin(dists))
+            return [
+                c0,
+                c1,
+                (c0 + c1) // 2,
+                np.array([0, 0, 0])
+            ]
 
-            # Prevent accidentally assigning index 3 to opaque
-            if color0 < color1 and index == 3:
-                index = 0
-        indices |= (index & 0x3) << (2 * i)
+    def color_dist(a, b):
+        dr = a[0] - b[0]
+        dg = a[1] - b[1]
+        db = a[2] - b[2]
+        return 2*dr*dr + 4*dg*dg + 3*db*db
+
+    def assign_indices(flat, palette, color0, color1):
+        indices = 0
+        assignments = []
+
+        for i, (r, g, b, a) in enumerate(flat):
+            if a < 128:
+                index = 3
+            else:
+                color = np.array([r, g, b])
+                dists = [color_dist(color, p) for p in palette]
+                index = int(np.argmin(dists))
+
+                if color0 < color1 and index == 3:
+                    index = 0
+
+            assignments.append(index)
+            indices |= (index & 0x3) << (2 * i)
+
+        return indices, assignments
+
+    palette = build_palette(color0, color1)
+    indices, assignments = assign_indices(flat, palette, color0, color1)
+
+    cluster0 = []
+    cluster1 = []
+
+    for (r, g, b, a), idx in zip(flat, assignments):
+        if a < 128:
+            continue
+        if idx == 0:
+            cluster0.append((r, g, b))
+        elif idx == 1:
+            cluster1.append((r, g, b))
+
+    if not cluster0:
+        cluster0 = opaque_pixels
+    if not cluster1:
+        cluster1 = opaque_pixels
+
+    def refine_cluster(cluster):
+        mean = np.mean(cluster, axis=0)
+        c565 = rgb888_to_rgb565(int(mean[0]), int(mean[1]), int(mean[2]))
+        return rgb565_to_rgb888(c565)
+
+    c0 = refine_cluster(cluster0)
+    c1 = refine_cluster(cluster1)
+
+    color0 = rgb888_to_rgb565(*c0)
+    color1 = rgb888_to_rgb565(*c1)
+
+    # re-apply ordering
+    if transparent_pixels_exist:
+        if color0 >= color1:
+            color0, color1 = color1, color0
+    else:
+        if color0 <= color1:
+            color0, color1 = color1, color0
+
+    palette = build_palette(color0, color1)
+    indices, _ = assign_indices(flat, palette, color0, color1)
 
     return struct.pack(">HHI", color0, color1, indices)
 
@@ -670,10 +757,8 @@ def write_tpl(data, directory):
     meta_end = header_size + table_size + image_headers_size + palette_headers_size
     data_start = (meta_end + 0x1F) & ~0x1F
 
-    total_palette_data_size = sum(len(pd) for _, _, _, _, pd in data if pd is not None)
-
     palette_data_offset = data_start
-    image_data_offset = data_start + total_palette_data_size
+    # image_data_offset set AFTER palette loop
 
     output += struct.pack(">I", 0x0020AF30)
     output += struct.pack(">I", image_count)
@@ -692,6 +777,9 @@ def write_tpl(data, directory):
 
     for fmt, image_header, img_data, pal_header, pal_data in data:
         if pal_header is not None:
+            # align BEFORE writing this palette
+            palette_data_offset = (palette_data_offset + 0x1F) & ~0x1F
+
             patched_pal_header = bytearray(pal_header)
             struct.pack_into(">I", patched_pal_header, 0x08, palette_data_offset)
 
@@ -699,12 +787,16 @@ def write_tpl(data, directory):
             palette_header_offsets.append(next_palette_header_offset)
             next_palette_header_offset += 0x0C
 
-            palette_data_blocks.append(pal_data)
+            palette_data_blocks.append((palette_data_offset, pal_data))
             palette_data_offset += len(pal_data)
         else:
             palette_header_offsets.append(0)
 
+    image_data_offset = palette_data_offset
+            
     for i, (fmt, image_header, img_data, pal_header, pal_data) in enumerate(data):
+        image_data_offset = (image_data_offset + 0x1F) & ~0x1F
+
         patched_header = bytearray(image_header)
         struct.pack_into(">I", patched_header, 0x08, image_data_offset)
 
@@ -713,7 +805,7 @@ def write_tpl(data, directory):
         image_header_offset = header_size + table_size + len(header_data) - 0x24
         table_entries.append(struct.pack(">II", image_header_offset, palette_header_offsets[i]))
 
-        image_data_blocks.append(img_data)
+        image_data_blocks.append((image_data_offset, img_data))
         image_data_offset += len(img_data)
 
     for entry in table_entries:
@@ -725,10 +817,18 @@ def write_tpl(data, directory):
     padding_len = data_start - len(output)
     output += b"\x00" * padding_len
 
-    for block in palette_data_blocks:
+    for offset, block in palette_data_blocks:
+        pad = offset - len(output)
+        if pad < 0:
+            raise RuntimeError("Palette overlap")
+        output += b"\x00" * pad
         output += block
 
-    for block in image_data_blocks:
+    for offset, block in image_data_blocks:
+        pad = offset - len(output)
+        if pad < 0:
+            raise RuntimeError("Image overlap")
+        output += b"\x00" * pad
         output += block
 
     with open(os.path.abspath(directory), "wb") as f:

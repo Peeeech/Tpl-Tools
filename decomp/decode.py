@@ -596,7 +596,7 @@ def decompress_cmpr_block(block):
     rgba0 = rgb565_to_rgba(c0)  # (r,g,b,255)
     rgba1 = rgb565_to_rgba(c1)  # (r,g,b,255)
     #print(hex(c0), hex(c1), rgba0, rgba1)
-    print(hex(int.from_bytes(color_table, "big")))
+    #print(hex(int.from_bytes(color_table, "big")))
 
     # Build the color palette for this block
     colors = [rgba0, rgba1]

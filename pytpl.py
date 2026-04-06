@@ -166,7 +166,7 @@ if __name__ == "__main__":
                 }
             )
 
-        data = encode.prep(fmtList, False, args.compress, args.compression_threshold)
+        data = encode.prep(fmtList, True, args.compress, args.compression_threshold)
         output_path = os.path.join(script_dir, "output.tpl")
         encode.write_tpl(data, output_path)
         print(f"Wrote output.tpl to {output_path}")
