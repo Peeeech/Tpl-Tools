@@ -4,6 +4,8 @@ import struct
 import re
 import numpy as np #type: ignore
 
+from . import dxt1 as dxt
+
 TPL_FORMATS = {
     "I4": 0x00,
     "I8": 0x01,
@@ -320,29 +322,43 @@ def encode_pil_image(img_obj, fmt, palette=None, quality=False):
                         encoded += struct.pack(">H", val)
 
     elif fmt == "CMPR":
+        import math
         #print(idx, img, fmt)
         img_obj = img.convert("RGBA")
         width, height = img_obj.size
-        pixels = img_obj.load()
+        pixels = [
+            (r / 255.0, g / 255.0, b / 255.0, a / 255.0)
+            for (r, g, b, a) in img_obj.getdata()
+        ]
+        block_size = (8, 8)
+        block_count_x = math.ceil(width / block_size[0])
+        block_count_y = math.ceil(height / block_size[1])
 
         encoded = bytearray()
 
-        for by in range(0, height, 8):
-            for bx in range(0, width, 8):
+        for block_y in range(block_count_y):
+            for block_x in range(block_count_x):
+                block_data = bytearray()
                 for subblock_y in range(2):
                     for subblock_x in range(2):
-                        block = []
-                        for y in reversed(range(4)):
-                            row = []
-                            for x in reversed(range(4)):
-                                px = bx + subblock_x * 4 + x
-                                py = by + subblock_y * 4 + y
-                                if px < width and py < height:
-                                    row.append(pixels[px, py])
+                        subblock = []
+
+                        for y in range(4):
+                            for x in range(4):
+                                px = block_x * 8 + subblock_x * 4 + x
+                                py = block_y * 8 + subblock_y * 4 + y
+
+                                if px >= width or py >= height:
+                                    subblock.append((0.0, 0.0, 0.0, 0.0))
                                 else:
-                                    row.append((0, 0, 0, 0))  # transparent pad
-                            block.append(row)
-                        encoded += encode_cmpr_block(block, quality)
+                                    subblock.append(pixels[py * width + px])
+
+                        subblock_data = dxt.dxt1_compress_block(subblock)
+                        block_data += subblock_data
+
+                # Write back block
+                encoded += block_data
+        
 
     elif fmt in ("C4", "C8"):
         if palette is None:
