@@ -653,8 +653,9 @@ def decode_CMPR(raw_data, height, width):
 
     macro_w = 8
     macro_h = 8
-    blocks_wide = width  // macro_w
-    blocks_high = height // macro_h
+    import math
+    blocks_wide = math.ceil(width / macro_w)
+    blocks_high = math.ceil(height / macro_h)
 
     offset = 0
     # For each 8x8 macro-block
@@ -684,6 +685,7 @@ def decode_CMPR(raw_data, height, width):
                         idx = (iy * width + ix) * 4
 
                         if iy < height and ix < width:
+                            idx = (iy * width + ix) * 4
                             rgba[idx:idx+4] = (r, g, b, a)
 
     return rgba
