@@ -77,6 +77,7 @@ if __name__ == "__main__":
     group.add_argument("-c", "--compile", action="store_true")
 
     parser.add_argument("input_file", help="Input file path.")
+    parser.add_argument("output_name", nargs='?', help="Output tpl name (exactly, no appended \".tpl\" if overwritten)", default="output.tpl")
     
     parser.add_argument("--compress", action=BooleanOptionalAction, default=False,
                     help="Compress too-big textures to CMPR to save memory")
@@ -167,7 +168,7 @@ if __name__ == "__main__":
             )
 
         data = encode.prep(fmtList, True, args.compress, args.compression_threshold)
-        output_path = os.path.join(script_dir, "output.tpl")
+        output_path = os.path.join(script_dir, f"{args.output_name}")
         encode.write_tpl(data, output_path)
         print(f"Wrote output.tpl to {output_path}")
         
